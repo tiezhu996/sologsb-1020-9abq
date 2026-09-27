@@ -3,7 +3,7 @@ import {
 } from '@builder.io/qwik';
 import { Checkbox, Modal, Tabs } from '@qwik-ui/headless';
 import type { ArchiveRecord, ArchiveState, FieldKey, MatchCandidate, RecordGroup } from './types';
-import { computeMatches, fieldValue, scorePair } from './utils/matching';
+import { fieldValue, reconcileMatches } from './utils/matching';
 import { seedState } from './data/seed';
 
 const STORAGE_KEY = 'sologsb-1020-archive-state-v1';
@@ -139,21 +139,20 @@ export default component$(() => {
     notify(`已批量处理 ${ids.length} 条匹配`);
   });
 
+  const choices = useStore<Record<FieldKey, RecordGroup | 'combine'>>({
+    title: 'A', date: 'A', people: 'A', places: 'A', identifier: 'A', medium: 'A', extent: 'A', rights: 'A', notes: 'A'
+  });
+
   const openMerge = $(() => {
     const match = activeMatch.value;
     if (!match) return;
+    const left = recordById(state, match.leftId);
+    const right = recordById(state, match.rightId);
+    if (!left || !right) return;
     state.activeMatchId = match.id;
-    fieldLabels.forEach(([field]) => {
-      const left = recordById(state, match.leftId);
-      const right = recordById(state, match.rightId);
-      if (left && right && fieldValue(left, field) === fieldValue(right, field)) choices[field] = 'A';
-      else choices[field] = 'A';
-    });
+    // 打开时重置为初始来源，默认保留 A；用户在窗口中逐字段改选
+    fieldLabels.forEach(([field]) => { choices[field] = 'A'; });
     mergeOpen.value = true;
-  });
-
-  const choices = useStore<Record<FieldKey, RecordGroup | 'combine'>>({
-    title: 'A', date: 'A', people: 'A', places: 'A', identifier: 'A', medium: 'A', extent: 'A', rights: 'A', notes: 'A'
   });
 
   const mergeCurrent = $(() => {
@@ -193,6 +192,10 @@ export default component$(() => {
     });
     commit('合并两条记录', `保留 ${Object.values(choices).filter((choice) => choice === 'A').length} 个 A 来源字段、${Object.values(choices).filter((choice) => choice === 'B').length} 个 B 来源字段`, [left.id, right.id, merged.id]);
     mergeOpen.value = false;
+    // 原记录已删除，跳到下一条仍可处理的待复核匹配，避免详情面板引用不存在的记录
+    const nextMatch = state.matches.find((item) => item.status === 'suggested'
+      && recordById(state, item.leftId) && recordById(state, item.rightId));
+    state.activeMatchId = nextMatch?.id ?? '';
     notify('记录已合并，来源与字段选择已写入审计记录');
   });
 
@@ -243,7 +246,8 @@ export default component$(() => {
       };
       state.records.push(record);
     });
-    state.matches = computeMatches(state.records);
+    // 保留既往确认 / 忽略 / 合并结论，只有此前未出现的新组合才进入待复核
+    state.matches = reconcileMatches(state.matches, state.records);
     commit('导入档案记录', `从 ${importGroup.value} 组导入 ${rows.length} 条记录`, []);
     importRaw.value = '';
     importText.value = '';
@@ -388,9 +392,9 @@ export default component$(() => {
                     <span class="record-id">{left?.identifier}</span>
                   </div>
                   <div class="pair-preview">
-                    <div><small>A · {left?.group}</small><strong>{left?.title}</strong><span>{parseDate(left?.date ?? '')} · {left?.people.join('、')}</span></div>
+                    <div><small>A · {left?.group ?? '—'}</small><strong>{left?.title ?? '记录已合并'}</strong><span>{parseDate(left?.date ?? '')} · {left?.people.join('、') ?? ''}</span></div>
                     <i>↔</i>
-                    <div><small>B · {right?.group}</small><strong>{right?.title}</strong><span>{parseDate(right?.date ?? '')} · {right?.people.join('、')}</span></div>
+                    <div><small>B · {right?.group ?? '—'}</small><strong>{right?.title ?? '记录已合并'}</strong><span>{parseDate(right?.date ?? '')} · {right?.people.join('、') ?? ''}</span></div>
                   </div>
                   <div class="reason-line">{match.reasons.join(' · ')}</div>
                 </article>
@@ -430,7 +434,7 @@ export default component$(() => {
           <Tabs.Root bind:selectedIndex={panelTab} class="review-tabs">
             <Tabs.List class="tab-list"><Tabs.Tab>复核详情</Tabs.Tab><Tabs.Tab>合并追溯</Tabs.Tab><Tabs.Tab>键盘帮助</Tabs.Tab></Tabs.List>
             <Tabs.Panel class="tab-panel">
-              {activeMatch.value ? (() => {
+              {activeMatch.value && recordById(state, activeMatch.value.leftId) && recordById(state, activeMatch.value.rightId) ? (() => {
                 const left = recordById(state, activeMatch.value!.leftId)!;
                 const right = recordById(state, activeMatch.value!.rightId)!;
                 return <>
@@ -440,7 +444,7 @@ export default component$(() => {
                   </div>
                   <div class="action-stack"><button class="button primary wide" onClick$={openMerge}>逐字段合并</button><div class="split-actions"><button class="button confirm" onClick$={() => updateMatch(activeMatch.value!.id, 'confirmed')}>确认匹配</button><button class="button ghost" onClick$={() => updateMatch(activeMatch.value!.id, 'rejected')}>忽略</button></div></div>
                 </>;
-              })() : <div class="empty-state">从左侧选择一条匹配查看字段来源。</div>}
+              })() : <div class="empty-state">该匹配的原始记录已合并或移除。{state.matches.some((item) => item.status === 'suggested') && '可用 J / K 切换到其他待复核匹配。'}</div>}
             </Tabs.Panel>
             <Tabs.Panel class="tab-panel">
               {state.merges.length ? state.merges.map((merge) => {
@@ -492,7 +496,7 @@ export default component$(() => {
       <Modal.Root bind:show={mergeOpen} closeOnBackdropClick>
         <Modal.Panel class="modal-panel merge-modal">
           <Modal.Header class="modal-header"><div><span class="eyebrow">FIELD MERGE</span><Modal.Title>逐字段选择保留来源</Modal.Title></div><Modal.Close class="modal-close">×</Modal.Close></Modal.Header>
-          {activeMatch.value && (() => {
+          {activeMatch.value && recordById(state, activeMatch.value.leftId) && recordById(state, activeMatch.value.rightId) && (() => {
             const left = recordById(state, activeMatch.value!.leftId)!;
             const right = recordById(state, activeMatch.value!.rightId)!;
             return <>

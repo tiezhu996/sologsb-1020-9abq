@@ -64,8 +64,10 @@ export function scorePair(left: ArchiveRecord, right: ArchiveRecord) {
 }
 
 export function computeMatches(records: ArchiveRecord[]): MatchCandidate[] {
-  const left = records.filter((record) => record.group === 'A');
-  const right = records.filter((record) => record.group === 'B');
+  // 已合并的记录退出匹配，避免合并结果又与其他记录生成新候选、重新进入待复核队列
+  const active = records.filter((record) => record.status !== 'merged');
+  const left = active.filter((record) => record.group === 'A');
+  const right = active.filter((record) => record.group === 'B');
   const matches: MatchCandidate[] = [];
   left.forEach((a) => {
     const candidates = right.map((b) => ({ record: b, ...scorePair(a, b) }))
@@ -89,4 +91,39 @@ export function computeMatches(records: ArchiveRecord[]): MatchCandidate[] {
 
 export function fieldValue(record: ArchiveRecord, field: FieldKey): string {
   return displayValue(record, field);
+}
+
+const pairKey = (leftId: string, rightId: string) => `${leftId}|${rightId}`;
+
+/**
+ * 在当前记录上重新计算候选匹配，但保留同一对记录已有的复核结论
+ * （已确认 / 已忽略 / 已合并）。只有此前从未出现过的组合才是新的待复核项；
+ * 因合并等原因不再参与计算的旧组合也原样保留其结论，不回到待复核队列。
+ */
+export function reconcileMatches(prev: MatchCandidate[], records: ArchiveRecord[]): MatchCandidate[] {
+  const decisions = new Map<string, { status: MatchCandidate['status']; reviewedAt?: string }>();
+  prev.forEach((match) => {
+    if (match.status !== 'suggested') {
+      decisions.set(pairKey(match.leftId, match.rightId), { status: match.status, reviewedAt: match.reviewedAt });
+    }
+  });
+
+  const fresh = computeMatches(records);
+  const seen = new Set<string>();
+  const next: MatchCandidate[] = fresh.map((candidate) => {
+    const key = pairKey(candidate.leftId, candidate.rightId);
+    seen.add(key);
+    const kept = decisions.get(key);
+    return kept ? { ...candidate, status: kept.status, reviewedAt: kept.reviewedAt } : candidate;
+  });
+
+  // 保留新计算中不再出现（如超出候选上限或记录已被合并移除）但既往已有结论的组合
+  prev.forEach((match) => {
+    const key = pairKey(match.leftId, match.rightId);
+    if (seen.has(key)) return;
+    seen.add(key);
+    next.push(match);
+  });
+
+  return next.sort((a, b) => b.score - a.score);
 }
