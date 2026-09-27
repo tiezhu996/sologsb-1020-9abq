@@ -3,7 +3,7 @@ import {
 } from '@builder.io/qwik';
 import { Checkbox, Modal, Tabs } from '@qwik-ui/headless';
 import type { ArchiveRecord, ArchiveState, FieldKey, MatchCandidate, RecordGroup } from './types';
-import { computeMatches, fieldValue, scorePair } from './utils/matching';
+import { fieldValue, reconcileMatches } from './utils/matching';
 import { seedState } from './data/seed';
 
 const STORAGE_KEY = 'sologsb-1020-archive-state-v1';
@@ -139,21 +139,16 @@ export default component$(() => {
     notify(`已批量处理 ${ids.length} 条匹配`);
   });
 
+  const choices = useStore<Record<FieldKey, RecordGroup | 'combine'>>({
+    title: 'A', date: 'A', people: 'A', places: 'A', identifier: 'A', medium: 'A', extent: 'A', rights: 'A', notes: 'A'
+  });
+
   const openMerge = $(() => {
     const match = activeMatch.value;
     if (!match) return;
     state.activeMatchId = match.id;
-    fieldLabels.forEach(([field]) => {
-      const left = recordById(state, match.leftId);
-      const right = recordById(state, match.rightId);
-      if (left && right && fieldValue(left, field) === fieldValue(right, field)) choices[field] = 'A';
-      else choices[field] = 'A';
-    });
+    fieldLabels.forEach(([field]) => { choices[field] = 'A'; });
     mergeOpen.value = true;
-  });
-
-  const choices = useStore<Record<FieldKey, RecordGroup | 'combine'>>({
-    title: 'A', date: 'A', people: 'A', places: 'A', identifier: 'A', medium: 'A', extent: 'A', rights: 'A', notes: 'A'
   });
 
   const mergeCurrent = $(() => {
@@ -243,12 +238,14 @@ export default component$(() => {
       };
       state.records.push(record);
     });
-    state.matches = computeMatches(state.records);
-    commit('导入档案记录', `从 ${importGroup.value} 组导入 ${rows.length} 条记录`, []);
+    const previousMatchIds = new Set(state.matches.map((match) => match.id));
+    state.matches = reconcileMatches(state.records, state.matches);
+    const newSuggested = state.matches.filter((match) => !previousMatchIds.has(match.id)).length;
+    commit('导入档案记录', `从 ${importGroup.value} 组导入 ${rows.length} 条记录，保留原有复核结论，新增 ${newSuggested} 条待复核匹配`, []);
     importRaw.value = '';
     importText.value = '';
     importOpen.value = false;
-    notify(`已导入 ${rows.length} 条记录并重新匹配`);
+    notify(`已导入 ${rows.length} 条记录，原有结论保留，新增 ${newSuggested} 条待复核匹配`);
   });
 
   const importFile = $(async (_event: Event, element: HTMLInputElement) => {

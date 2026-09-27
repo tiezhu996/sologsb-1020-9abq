@@ -87,6 +87,16 @@ export function computeMatches(records: ArchiveRecord[]): MatchCandidate[] {
   return matches.sort((a, b) => b.score - a.score);
 }
 
+export function reconcileMatches(records: ArchiveRecord[], previous: MatchCandidate[]): MatchCandidate[] {
+  const matchable = records.filter((record) => record.status !== 'merged');
+  const priorById = new Map(previous.map((match) => [match.id, match]));
+  return computeMatches(matchable).map((match) => {
+    const prior = priorById.get(match.id);
+    if (!prior) return match;
+    return { ...match, status: prior.status, reviewedAt: prior.reviewedAt };
+  });
+}
+
 export function fieldValue(record: ArchiveRecord, field: FieldKey): string {
   return displayValue(record, field);
 }
